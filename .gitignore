@@ -1,0 +1,10 @@
+# Kisisel/gizli ayarlar - API anahtari icerir, asla depoya eklenmez
+config.py
+
+# Python
+__pycache__/
+*.pyc
+
+# Calisma zamani loglari (kisisel dosya yollari icerebilir)
+fetch_log.txt
+run_daily.log

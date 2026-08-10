@@ -1,0 +1,641 @@
+"""
+generate_dashboard.py
+----------------------
+data/prices.csv dosyasini okuyup, tarayicida acilabilen bagimsiz (self-contained)
+bir HTML dashboard (dashboard.html) uretir. Harici kutuphane/CDN'e ihtiyac
+duymaz; veri HTML icine JSON olarak gomulur (dosyayi cift tiklayip file://
+uzerinden acmak da calisir).
+
+Kullanim:
+    python generate_dashboard.py
+"""
+
+import csv
+import json
+import os
+import sys
+from datetime import datetime
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_PATH = os.path.join(SCRIPT_DIR, "data", "prices.csv")
+OUTPUT_PATH = os.path.join(SCRIPT_DIR, "dashboard.html")
+
+METRICS = [
+    {"key": "usd_try", "title": "USD / TRY", "unit": "TRY", "decimals": 4},
+    {"key": "eur_try", "title": "EUR / TRY", "unit": "TRY", "decimals": 4},
+    {"key": "gram_altin_try", "title": "Gram Altin (spot)", "unit": "TRY", "decimals": 2},
+    {"key": "gram_gumus_try", "title": "Gram Gumus (spot)", "unit": "TRY", "decimals": 2},
+    {"key": "brent_usd_bbl", "title": "Brent Petrol (USD/varil)", "unit": "USD/varil", "decimals": 2},
+    {"key": "brent_try_bbl", "title": "Brent Petrol (TRY/varil)", "unit": "TRY/varil", "decimals": 2},
+    {"key": "mevduat_faiz_pct", "title": "TL Mevduat Faizi (1 Aya Kadar, TCMB Ort.)", "unit": "%", "decimals": 2},
+]
+
+
+def load_rows():
+    """CSV'yi okur. Bir satirdaki tek tek metrik alanlari bos/gecersiz
+    olabilir (orn. EVDS anahtari girilmemisse mevduat_faiz_pct, ya da
+    Brent kaynagi o gun basarisiz olmussa brent_* bos kalir) - bu durumda
+    sadece o metrik icin None yazilir, satirin tamami atilmaz."""
+    if not os.path.exists(CSV_PATH):
+        print(f"HATA: {CSV_PATH} bulunamadi. Once fetch_data.py calistirin.")
+        sys.exit(1)
+
+    rows = []
+    with open(CSV_PATH, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            try:
+                ts = datetime.strptime(r["timestamp_local"], "%Y-%m-%d %H:%M:%S")
+            except (ValueError, KeyError):
+                continue
+            row = {"ts": ts.strftime("%Y-%m-%dT%H:%M:%S")}
+            for m in METRICS:
+                raw = r.get(m["key"], "")
+                try:
+                    row[m["key"]] = float(raw) if raw not in (None, "") else None
+                except ValueError:
+                    row[m["key"]] = None
+            rows.append(row)
+    rows.sort(key=lambda r: r["ts"])
+    return rows
+
+
+HTML_TEMPLATE = """<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TRY Piyasa Takip Paneli</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-1:       #2a78d6;
+    --series-1-wash:  rgba(42,120,214,0.10);
+    --good:           #006300;
+    --bad:            #d03b3b;
+    --card-radius:    12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page:           #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --gridline:       #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-1:       #3987e5;
+      --series-1-wash:  rgba(57,135,229,0.14);
+      --good:           #0ca30c;
+      --bad:            #e66767;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --page:           #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --gridline:       #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-1:       #3987e5;
+    --series-1-wash:  rgba(57,135,229,0.14);
+    --good:           #0ca30c;
+    --bad:            #e66767;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 20px 60px; }
+
+  .topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .subtitle { color: var(--text-secondary); font-size: 13px; margin: 0; }
+  .theme-toggle {
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
+    border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+  }
+  .theme-toggle:hover { color: var(--text-primary); }
+
+  .filters { display: flex; gap: 6px; margin: 20px 0 18px; flex-wrap: wrap; }
+  .filter-btn {
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
+    border-radius: 999px; padding: 6px 14px; font-size: 13px; cursor: pointer;
+  }
+  .filter-btn[aria-pressed="true"] { background: var(--series-1); color: #fff; border-color: var(--series-1); }
+
+  .kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 22px; }
+  .stat-tile {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--card-radius);
+    padding: 14px 16px;
+  }
+  .stat-tile .label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .stat-tile .value { font-size: 24px; font-weight: 600; }
+  .stat-tile .delta { font-size: 12px; margin-top: 4px; }
+  .stat-tile .delta.up { color: var(--good); }
+  .stat-tile .delta.down { color: var(--bad); }
+  .stat-tile .delta.flat { color: var(--text-muted); }
+
+  .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
+  .chart-card {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--card-radius);
+    padding: 16px; position: relative;
+  }
+  .chart-card h2 { font-size: 14px; margin: 0 0 2px; }
+  .chart-card .latest { font-size: 12px; color: var(--text-secondary); margin: 0 0 8px; }
+  .chart-card svg { width: 100%; height: auto; display: block; overflow: visible; }
+  .empty-state { color: var(--text-muted); font-size: 13px; padding: 40px 0; text-align: center; }
+
+  .gridline { stroke: var(--gridline); stroke-width: 1; }
+  .baseline { stroke: var(--baseline); stroke-width: 1; }
+  .axis-label { fill: var(--text-muted); font-size: 10px; }
+  .series-line { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .series-area { fill: var(--series-1-wash); stroke: none; }
+  .end-dot { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; }
+  .crosshair { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0; pointer-events: none; }
+  .hover-dot { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; opacity: 0; pointer-events: none; }
+  .hit-layer { fill: transparent; cursor: crosshair; }
+  .end-label { font-size: 12px; font-weight: 600; fill: var(--text-primary); }
+
+  .tooltip {
+    position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 10px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,0.15);
+    opacity: 0; transform: translate(-50%, -110%); white-space: nowrap; z-index: 5;
+  }
+  .tooltip .t-date { color: var(--text-secondary); margin-bottom: 2px; }
+  .tooltip .t-value { color: var(--text-primary); font-weight: 700; }
+
+  details.table-toggle { margin-top: 26px; }
+  details.table-toggle summary {
+    cursor: pointer; font-size: 13px; color: var(--text-secondary); padding: 8px 0;
+  }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--card-radius); margin-top: 10px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--gridline); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--text-secondary); font-weight: 600; position: sticky; top: 0; background: var(--surface-1); }
+
+  footer { margin-top: 30px; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+  footer a { color: var(--text-secondary); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <div>
+      <h1>TRY Piyasa Takip Paneli</h1>
+      <p class="subtitle" id="subtitle">Yukleniyor...</p>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button">Tema</button>
+  </div>
+
+  <div class="filters" id="filters" role="group" aria-label="Tarih araligi"></div>
+
+  <div class="kpi-row" id="kpiRow"></div>
+
+  <div class="charts-grid" id="chartsGrid"></div>
+
+  <details class="table-toggle">
+    <summary>Tablo gorunumu (ham veri)</summary>
+    <div class="table-wrap">
+      <table id="dataTable">
+        <thead></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </details>
+
+  <footer>
+    Kaynaklar: doviz kurlari <a href="https://www.frankfurter.app" target="_blank" rel="noopener">frankfurter.app</a>
+    (yedek: open.er-api.com) &middot; kiymetli maden spot fiyatlari
+    <a href="https://gold-api.com" target="_blank" rel="noopener">gold-api.com</a> (XAU/XAG, USD/ons,
+    31.1034768 g/ons ile grama cevrilir, sonra USD/TRY ile TRY'ye cevrilir) &middot;
+    Brent petrol <a href="https://finance.yahoo.com/quote/BZ=F" target="_blank" rel="noopener">Yahoo Finance</a>
+    (sembol BZ=F, resmi olmayan/unofficial bir endpoint) &middot; TL mevduat faizi
+    <a href="https://evds3.tcmb.gov.tr" target="_blank" rel="noopener">TCMB EVDS</a>
+    (seri TP.TRY.MT01, 1 aya kadar vadeli TL mevduat, haftalik).
+    Bu fiyatlar uluslararasi spot referanslar veya resmi TCMB serileridir; yerel kuyumcu/banka
+    fiyatlarindan farklilik gosterebilir. Veri "data/prices.csv" dosyasindan uretildi &middot;
+    olusturulma zamani: <span id="generatedAt"></span>.
+  </footer>
+
+</div>
+
+<div class="tooltip" id="tooltip">
+  <div class="t-date" id="tooltipDate"></div>
+  <div class="t-value" id="tooltipValue"></div>
+</div>
+
+<script>
+const DATA = __DATA_JSON__;
+const METRICS = __METRICS_JSON__;
+const GENERATED_AT = __GENERATED_AT_JSON__;
+
+document.getElementById('generatedAt').textContent = GENERATED_AT;
+
+// ---------- Theme toggle ----------
+(function () {
+  const root = document.documentElement;
+  const stored = localStorage.getItem('try-tracker-theme');
+  if (stored) root.setAttribute('data-theme', stored);
+  document.getElementById('themeToggle').addEventListener('click', () => {
+    const current = root.getAttribute('data-theme') ||
+      (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    const next = current === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    localStorage.setItem('try-tracker-theme', next);
+  });
+})();
+
+// ---------- Date range filter ----------
+const RANGES = [
+  { label: '7 Gun', days: 7 },
+  { label: '30 Gun', days: 30 },
+  { label: '90 Gun', days: 90 },
+  { label: '6 Ay', days: 183 },
+  { label: 'Tumu', days: null },
+];
+let activeDays = 183;
+
+const filtersEl = document.getElementById('filters');
+RANGES.forEach(r => {
+  const btn = document.createElement('button');
+  btn.className = 'filter-btn';
+  btn.type = 'button';
+  btn.textContent = r.label;
+  btn.setAttribute('aria-pressed', String(r.days === activeDays));
+  btn.addEventListener('click', () => {
+    activeDays = r.days;
+    [...filtersEl.children].forEach(c => c.setAttribute('aria-pressed', 'false'));
+    btn.setAttribute('aria-pressed', 'true');
+    render();
+  });
+  filtersEl.appendChild(btn);
+});
+
+function filteredData() {
+  if (!DATA.length) return [];
+  if (activeDays === null) return DATA;
+  const lastTs = new Date(DATA[DATA.length - 1].ts).getTime();
+  const cutoff = lastTs - activeDays * 86400000;
+  return DATA.filter(d => new Date(d.ts).getTime() >= cutoff);
+}
+
+// ---------- Formatting helpers ----------
+function fmt(value, decimals) {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—';
+  return value.toLocaleString('tr-TR', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+function fmtDate(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString('tr-TR', { day: '2-digit', month: 'short' });
+}
+function fmtDateTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleString('tr-TR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+// ---------- KPI tiles ----------
+function renderKpis(data) {
+  const kpiRow = document.getElementById('kpiRow');
+  kpiRow.innerHTML = '';
+  METRICS.forEach(m => {
+    const tile = document.createElement('div');
+    tile.className = 'stat-tile';
+
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.textContent = m.title;
+
+    const value = document.createElement('div');
+    value.className = 'value';
+
+    const delta = document.createElement('div');
+    delta.className = 'delta flat';
+
+    // Bu metrik icin dolu (null olmayan) degerleri sondan basa dogru bul -
+    // Brent/mevduat faizi gibi opsiyonel alanlar bazi gunlerde bos olabilir.
+    const known = data.filter(d => d[m.key] !== null && d[m.key] !== undefined);
+
+    if (known.length) {
+      const last = known[known.length - 1][m.key];
+      value.textContent = fmt(last, m.decimals) + ' ' + m.unit;
+      if (known.length >= 2) {
+        const prev = known[known.length - 2][m.key];
+        const diff = last - prev;
+        const pct = prev !== 0 ? (diff / prev) * 100 : 0;
+        const sign = diff > 0 ? '+' : '';
+        delta.textContent = `${sign}${fmt(diff, m.decimals)} (${sign}${pct.toFixed(2)}%) onceki olcume gore`;
+        delta.className = 'delta ' + (diff > 0 ? 'up' : diff < 0 ? 'down' : 'flat');
+      } else {
+        delta.textContent = 'Trend icin daha fazla veri gerekiyor';
+      }
+    } else {
+      value.textContent = '—';
+      delta.textContent = 'Veri yok (bkz. README / config.py)';
+    }
+
+    tile.appendChild(label);
+    tile.appendChild(value);
+    tile.appendChild(delta);
+    kpiRow.appendChild(tile);
+  });
+}
+
+// ---------- Line chart (SVG, custom, no external deps) ----------
+function renderChart(container, data, metric) {
+  container.innerHTML = '';
+
+  const title = document.createElement('h2');
+  title.textContent = metric.title;
+  container.appendChild(title);
+
+  // Bu metrik icin dolu (null olmayan) noktalari kullan - Brent/mevduat
+  // faizi gibi opsiyonel alanlar bazi gunlerde bos olabilir.
+  const known = data.filter(d => d[metric.key] !== null && d[metric.key] !== undefined);
+
+  const latest = document.createElement('p');
+  latest.className = 'latest';
+  if (known.length) {
+    const lastKnown = known[known.length - 1];
+    latest.textContent = `Guncel: ${fmt(lastKnown[metric.key], metric.decimals)} ${metric.unit}  ·  ${fmtDateTime(lastKnown.ts)}`;
+  }
+  container.appendChild(latest);
+
+  if (known.length < 2) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = known.length === 1
+      ? 'Trend cizgisi icin en az 2 veri noktasi gerekiyor. Script birkac gun calistiktan sonra grafik olusacak.'
+      : 'Bu olcum icin henuz veri yok (opsiyonel bir kaynaksa README / config.py dosyasini kontrol edin).';
+    container.appendChild(empty);
+    return;
+  }
+
+  const data2 = known; // asagidaki hesaplamalar sadece dolu noktalar uzerinden
+
+  const W = 640, H = 240;
+  const padL = 46, padR = 14, padT = 14, padB = 24;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+
+  const xs = data2.map(d => new Date(d.ts).getTime());
+  const ys = data2.map(d => d[metric.key]);
+  const xMin = Math.min(...xs), xMax = Math.max(...xs);
+  const yMinRaw = Math.min(...ys), yMaxRaw = Math.max(...ys);
+  const pad = (yMaxRaw - yMinRaw) * 0.12 || Math.abs(yMaxRaw) * 0.02 || 1;
+  const yMin = yMinRaw - pad, yMax = yMaxRaw + pad;
+
+  const xScale = (t) => padL + (xMax === xMin ? plotW / 2 : ((t - xMin) / (xMax - xMin)) * plotW);
+  const yScale = (v) => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+  const points = data2.map(d => ({ x: xScale(new Date(d.ts).getTime()), y: yScale(d[metric.key]), raw: d }));
+
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', metric.title + ' trend grafigi');
+
+  // gridlines (4 horizontal steps)
+  const steps = 4;
+  for (let i = 0; i <= steps; i++) {
+    const v = yMin + (i / steps) * (yMax - yMin);
+    const y = yScale(v);
+    const line = document.createElementNS(svgNS, 'line');
+    line.setAttribute('class', 'gridline');
+    line.setAttribute('x1', padL); line.setAttribute('x2', W - padR);
+    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    svg.appendChild(line);
+
+    const label = document.createElementNS(svgNS, 'text');
+    label.setAttribute('class', 'axis-label');
+    label.setAttribute('x', padL - 6);
+    label.setAttribute('y', y + 3);
+    label.setAttribute('text-anchor', 'end');
+    label.textContent = v.toLocaleString('tr-TR', { maximumFractionDigits: metric.decimals >= 4 ? 2 : metric.decimals });
+    svg.appendChild(label);
+  }
+
+  // baseline (bottom axis)
+  const baseline = document.createElementNS(svgNS, 'line');
+  baseline.setAttribute('class', 'baseline');
+  baseline.setAttribute('x1', padL); baseline.setAttribute('x2', W - padR);
+  baseline.setAttribute('y1', padT + plotH); baseline.setAttribute('y2', padT + plotH);
+  svg.appendChild(baseline);
+
+  // x-axis labels: first, middle, last
+  [0, Math.floor((points.length - 1) / 2), points.length - 1].forEach((idx, i) => {
+    const p = points[idx];
+    const label = document.createElementNS(svgNS, 'text');
+    label.setAttribute('class', 'axis-label');
+    label.setAttribute('x', p.x);
+    label.setAttribute('y', H - 6);
+    label.setAttribute('text-anchor', i === 0 ? 'start' : i === 2 ? 'end' : 'middle');
+    label.textContent = fmtDate(p.raw.ts);
+    svg.appendChild(label);
+  });
+
+  // area wash
+  const areaPath = ['M', points[0].x, padT + plotH, 'L'];
+  points.forEach(p => areaPath.push(p.x, p.y, 'L'));
+  areaPath.push(points[points.length - 1].x, padT + plotH, 'Z');
+  const area = document.createElementNS(svgNS, 'path');
+  area.setAttribute('class', 'series-area');
+  area.setAttribute('d', areaPath.join(' '));
+  svg.appendChild(area);
+
+  // line
+  const linePath = points.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ' ' + p.y).join(' ');
+  const line = document.createElementNS(svgNS, 'path');
+  line.setAttribute('class', 'series-line');
+  line.setAttribute('d', linePath);
+  svg.appendChild(line);
+
+  // end dot + label
+  const lastP = points[points.length - 1];
+  const endDot = document.createElementNS(svgNS, 'circle');
+  endDot.setAttribute('class', 'end-dot');
+  endDot.setAttribute('cx', lastP.x); endDot.setAttribute('cy', lastP.y); endDot.setAttribute('r', 4);
+  svg.appendChild(endDot);
+
+  const endLabel = document.createElementNS(svgNS, 'text');
+  endLabel.setAttribute('class', 'end-label');
+  endLabel.setAttribute('x', lastP.x);
+  endLabel.setAttribute('y', lastP.y - 10);
+  endLabel.setAttribute('text-anchor', 'end');
+  endLabel.textContent = fmt(lastP.raw[metric.key], metric.decimals);
+  svg.appendChild(endLabel);
+
+  // crosshair + hover dot
+  const crosshair = document.createElementNS(svgNS, 'line');
+  crosshair.setAttribute('class', 'crosshair');
+  crosshair.setAttribute('y1', padT); crosshair.setAttribute('y2', padT + plotH);
+  svg.appendChild(crosshair);
+
+  const hoverDot = document.createElementNS(svgNS, 'circle');
+  hoverDot.setAttribute('class', 'hover-dot');
+  hoverDot.setAttribute('r', 4);
+  svg.appendChild(hoverDot);
+
+  // hit layer
+  const hit = document.createElementNS(svgNS, 'rect');
+  hit.setAttribute('class', 'hit-layer');
+  hit.setAttribute('x', padL); hit.setAttribute('y', padT);
+  hit.setAttribute('width', plotW); hit.setAttribute('height', plotH);
+  hit.setAttribute('tabindex', '0');
+  svg.appendChild(hit);
+
+  container.appendChild(svg);
+
+  const tooltip = document.getElementById('tooltip');
+  const tooltipDate = document.getElementById('tooltipDate');
+  const tooltipValue = document.getElementById('tooltipValue');
+  let focusIdx = points.length - 1;
+
+  function showAt(idx, clientX, clientY) {
+    idx = Math.max(0, Math.min(points.length - 1, idx));
+    focusIdx = idx;
+    const p = points[idx];
+    crosshair.setAttribute('x1', p.x); crosshair.setAttribute('x2', p.x);
+    crosshair.style.opacity = 1;
+    hoverDot.setAttribute('cx', p.x); hoverDot.setAttribute('cy', p.y);
+    hoverDot.style.opacity = 1;
+
+    tooltipDate.textContent = fmtDateTime(p.raw.ts);
+    tooltipValue.textContent = fmt(p.raw[metric.key], metric.decimals) + ' ' + metric.unit;
+    tooltip.style.opacity = 1;
+
+    const rect = container.getBoundingClientRect();
+    const px = clientX !== undefined ? clientX - rect.left : (p.x / W) * rect.width;
+    const py = clientY !== undefined ? clientY - rect.top : (p.y / H) * (rect.height);
+    tooltip.style.left = (rect.left + window.scrollX + px) + 'px';
+    tooltip.style.top = (rect.top + window.scrollY + py) + 'px';
+  }
+
+  function hide() {
+    crosshair.style.opacity = 0;
+    hoverDot.style.opacity = 0;
+    tooltip.style.opacity = 0;
+  }
+
+  hit.addEventListener('pointermove', (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const scaleX = W / rect.width;
+    const localX = (ev.clientX - rect.left) * scaleX;
+    let nearest = 0, best = Infinity;
+    points.forEach((p, i) => {
+      const d = Math.abs(p.x - localX);
+      if (d < best) { best = d; nearest = i; }
+    });
+    showAt(nearest, ev.clientX, ev.clientY);
+  });
+  hit.addEventListener('pointerleave', hide);
+  hit.addEventListener('focus', () => showAt(points.length - 1));
+  hit.addEventListener('blur', hide);
+  hit.addEventListener('keydown', (ev) => {
+    if (ev.key === 'ArrowLeft') { showAt(focusIdx - 1); ev.preventDefault(); }
+    if (ev.key === 'ArrowRight') { showAt(focusIdx + 1); ev.preventDefault(); }
+  });
+}
+
+// ---------- Table view ----------
+function renderTable(data) {
+  const table = document.getElementById('dataTable');
+  const thead = table.querySelector('thead');
+  const tbody = table.querySelector('tbody');
+  thead.innerHTML = '';
+  tbody.innerHTML = '';
+
+  const headRow = document.createElement('tr');
+  const thDate = document.createElement('th');
+  thDate.textContent = 'Tarih / Saat';
+  headRow.appendChild(thDate);
+  METRICS.forEach(m => {
+    const th = document.createElement('th');
+    th.textContent = m.title;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+
+  // newest first for readability
+  [...data].reverse().forEach(row => {
+    const tr = document.createElement('tr');
+    const tdDate = document.createElement('td');
+    tdDate.textContent = fmtDateTime(row.ts);
+    tr.appendChild(tdDate);
+    METRICS.forEach(m => {
+      const td = document.createElement('td');
+      td.textContent = fmt(row[m.key], m.decimals);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+// ---------- Main render ----------
+function render() {
+  const data = filteredData();
+  const subtitle = document.getElementById('subtitle');
+  if (data.length) {
+    subtitle.textContent = `${data.length} veri noktasi  ·  ${fmtDateTime(data[0].ts)} — ${fmtDateTime(data[data.length - 1].ts)}`;
+  } else {
+    subtitle.textContent = 'Henuz veri yok. fetch_data.py calistirin.';
+  }
+
+  renderKpis(data);
+
+  const grid = document.getElementById('chartsGrid');
+  grid.innerHTML = '';
+  METRICS.forEach(m => {
+    const card = document.createElement('div');
+    card.className = 'chart-card';
+    grid.appendChild(card);
+    renderChart(card, data, m);
+  });
+
+  renderTable(data);
+}
+
+render();
+</script>
+</body>
+</html>
+"""
+
+
+def main():
+    rows = load_rows()
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    html = HTML_TEMPLATE
+    html = html.replace("__DATA_JSON__", json.dumps(rows, ensure_ascii=False))
+    html = html.replace("__METRICS_JSON__", json.dumps(METRICS, ensure_ascii=False))
+    html = html.replace("__GENERATED_AT_JSON__", json.dumps(generated_at, ensure_ascii=False))
+
+    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    print(f"Dashboard olusturuldu: {OUTPUT_PATH}")
+    print(f"Veri noktasi sayisi: {len(rows)}")
+
+
+if __name__ == "__main__":
+    main()
