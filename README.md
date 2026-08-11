@@ -12,13 +12,17 @@ try-tracker/
   fetch_data.py         -> Veriyi ceker, data/prices.csv'ye ekler (append)
   generate_dashboard.py -> data/prices.csv'yi okuyup dashboard.html uretir
   config.py               -> Kisisel ayarlar (TCMB EVDS API anahtari) - PAYLASMAYIN
+  config.example.py      -> config.py icin sablon (repoya eklenir, anahtar icermez)
   run_daily.bat          -> Ikisini sirayla calistiran toplu is dosyasi (Gorev Zamanlayici bunu cagirir)
   requirements.txt       -> Python bagimliliklari
   data/
     prices.csv            -> Biriken tarihsel veri (tarih damgali)
   dashboard.html          -> Uretilen, cift tiklanip acilabilen HTML sayfasi
-  fetch_log.txt           -> fetch_data.py calisma gecmisi/hatalari
-  run_daily.log           -> run_daily.bat calisma gecmisi
+  index.html              -> GitHub Pages icin dashboard.html'e yonlendiren kok sayfa
+  fetch_log.txt           -> fetch_data.py calisma gecmisi/hatalari (repoya eklenmez)
+  run_daily.log           -> run_daily.bat calisma gecmisi (repoya eklenmez)
+  .github/workflows/
+    update-dashboard.yml  -> Her 5 dakikada bir veriyi ceken/yayinlayan GitHub Actions workflow'u
 ```
 
 ## Veri kaynakları
@@ -112,18 +116,43 @@ budur).
 
 ## GitHub Pages ile yayınlama
 
-Bu repo GitHub Pages üzerinde barındırılabilir; kök dizindeki `index.html`
-otomatik olarak `dashboard.html`'e yönlendirir. Yayınlanan sayfa,
-`generate_dashboard.py`'nin en son çalıştırıldığı andaki veriyi gösterir —
-**otomatik canlı güncellenmez**, güncel kalması için `git add`/`commit`/`push`
-ile tekrar yüklemeniz gerekir (isterseniz bunu bir GitHub Actions
-zamanlanmış görevine bağlayarak otomatikleştirebilirsiniz, bu repo şu an
-için buna sahip değil).
+Bu repo GitHub Pages üzerinde barındırılıyor; kök dizindeki `index.html`
+otomatik olarak `dashboard.html`'e yönlendirir. `main` dalına her push
+GitHub Pages'i otomatik olarak yeniden derler (Settings > Pages ayarında
+"Deploy from a branch: main / (root)").
 
 `config.py` (TCMB EVDS API anahtarınızı içerir) `.gitignore` ile hariç
 tutulmuştur ve depoya yüklenmez. Başka bir makinede kurarken
 `config.example.py` dosyasını `config.py` olarak kopyalayıp kendi
 anahtarınızı girin.
+
+## GitHub Actions ile otomatik güncelleme (her 5 dakikada bir)
+
+`.github/workflows/update-dashboard.yml` GitHub'ın kendi sunucularında
+(sizin bilgisayarınız kapalı/uykuda olsa bile) her ~5 dakikada bir
+çalışır: `fetch_data.py` ile veri çeker, `generate_dashboard.py` ile
+`dashboard.html`'i yeniden üretir, değişiklik varsa otomatik commit +
+push yapar. Push, GitHub Pages'in otomatik yeniden derlenmesini tetikler,
+yani site sürekli güncel kalır.
+
+Notlar:
+
+- **`*/5 * * * *`** GitHub'ın izin verdiği en kısa aralıktır; yoğun
+  dönemlerde birkaç dakika gecikme olabilir, garanti bir SLA değildir.
+- **TL Mevduat Faizi (TCMB EVDS)** alanının Actions'ta da çalışması için
+  isteğe bağlı olarak bir repository secret eklemeniz gerekir: **Settings
+  > Secrets and variables > Actions > New repository secret**, isim
+  `EVDS_API_KEY`, değer kendi TCMB EVDS anahtarınız. Eklenmezse script
+  hata vermez, sadece bu alan Actions çalıştırmalarında boş kalır.
+- Workflow her çalıştığında `data/prices.csv`'ye bir satır eklendiği için
+  CSV zamanla hızla büyür (günde ~288 satıra kadar); bu normaldir ama
+  isterseniz cron aralığını (`*/5 * * * *` → örn. `0 * * * *` = saatte bir)
+  gevşeterek büyümeyi yavaşlatabilirsiniz.
+- **Yerel `run_daily.bat` / Task Scheduler'ı da aynı anda kullanıyorsanız**
+  iki taraf da aynı dosyalara push yapmaya çalışabilir; push etmeden önce
+  `git pull --rebase origin main` çalıştırmadan push ederseniz "rejected
+  (fetch first)" hatası alabilirsiniz. En basit kurulum: veri çekmeyi
+  sadece GitHub Actions'a bırakıp yerel zamanlayıcıyı kapatmaktır.
 
 ## Windows Görev Zamanlayıcısı (Task Scheduler) ile günde bir kez otomatik çalıştırma
 

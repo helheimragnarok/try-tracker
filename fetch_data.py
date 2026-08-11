@@ -41,8 +41,8 @@ from datetime import datetime, timedelta, timezone
 try:
     import truststore
     truststore.inject_into_ssl()
-except ImportError:
-    pass  # truststore kurulu degilse normal certifi ile devam edilir
+except Exception:
+    pass  # truststore kurulu degilse veya bu ortamda desteklenmiyorsa normal certifi ile devam edilir
 
 import requests
 
@@ -53,8 +53,13 @@ try:
 except ImportError:
     config = None
 
+# Oncelik sirasi: config.py -> ortam degiskeni (GitHub Actions secret'i icin,
+# repo'ya girmeyen config.py yerine EVDS_API_KEY/EVDS_SERIES env var'lari
+# kullanilabilir) -> bos.
 EVDS_API_KEY = getattr(config, "EVDS_API_KEY", "") if config else ""
-EVDS_SERIES = getattr(config, "EVDS_SERIES", "TP.TRY.MT01") if config else "TP.TRY.MT01"
+EVDS_API_KEY = EVDS_API_KEY or os.environ.get("EVDS_API_KEY", "")
+EVDS_SERIES = getattr(config, "EVDS_SERIES", "") if config else ""
+EVDS_SERIES = EVDS_SERIES or os.environ.get("EVDS_SERIES", "TP.TRY.MT01")
 
 TROY_OUNCE_TO_GRAM = 31.1034768
 
@@ -277,7 +282,12 @@ def main() -> int:
         brent_try = brent_usd * usd_try if brent_usd is not None else None
 
         now_utc = datetime.now(timezone.utc)
-        now_local = datetime.now()
+        # Turkiye sabit UTC+3 kullanir (2016'dan beri yaz saati uygulamasi
+        # yok), bu yuzden calistigi makinenin (Windows yerel saati veya
+        # GitHub Actions'in UTC'si) saat dilimine bagli kalmadan sabit bir
+        # ofsetle hesaplanir - boylece yerel ve Actions kaynakli satirlar
+        # ayni saat dilimini kullanir.
+        now_local = now_utc.astimezone(timezone(timedelta(hours=3)))
 
         row = {
             "timestamp_utc": now_utc.strftime("%Y-%m-%d %H:%M:%S"),
