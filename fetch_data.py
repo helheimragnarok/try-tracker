@@ -44,6 +44,8 @@ try:
 except Exception:
     pass  # truststore kurulu degilse veya bu ortamda desteklenmiyorsa normal certifi ile devam edilir
 
+import time
+
 import requests
 
 # config.py opsiyoneldir (ozellikle EVDS_API_KEY icin). Yoksa/eksikse
@@ -85,6 +87,14 @@ CSV_HEADERS = [
 REQUEST_TIMEOUT = 15
 YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
+# Gecici ag hatalari / API blip'leri icin: her kaynak denemesi basarisiz
+# olursa hemen pes etmek yerine kisa bir bekleme ile birkac kez tekrar
+# dener. Boylece 5 dakikada bir calisan bu workflow, bir API'nin
+# birkac saniyeligine 5xx/timeout vermesi yuzunden kirmizi (failed)
+# gorunmez.
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = 3
+
 
 def log(message: str) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -97,20 +107,47 @@ def log(message: str) -> None:
         pass
 
 
+def request_with_retry(method_kwargs_desc: str, request_fn, attempts: int = RETRY_ATTEMPTS):
+    """`request_fn` parametresiz bir fonksiyon olup basarili bir
+    requests.Response dondurmeli (veya exception firlatmali). Ardisik
+    denemeler arasinda RETRY_BACKOFF_SECONDS kadar bekler. Tum denemeler
+    basarisiz olursa son exception'i yeniden firlatir. `method_kwargs_desc`
+    sadece log mesajlarinda hangi istegin tekrar denendigini belirtmek icin
+    kullanilan kisa bir aciklama (ornegin 'gold-api.com XAU')."""
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return request_fn()
+        except Exception as exc:  # noqa: BLE001 - kasitli genis yakalama, retry icin
+            last_exc = exc
+            if attempt < attempts:
+                log(
+                    f"UYARI: {method_kwargs_desc} basarisiz (deneme {attempt}/{attempts}): {exc}. "
+                    f"{RETRY_BACKOFF_SECONDS}sn sonra tekrar denenecek."
+                )
+                time.sleep(RETRY_BACKOFF_SECONDS)
+    assert last_exc is not None
+    raise last_exc
+
+
 def fetch_exchange_rates() -> dict:
     """USD/TRY ve EUR/TRY kurlarini dondurur. Once frankfurter.app, o
     calismazsa open.er-api.com denenir. Ikisi de basarisiz olursa
     RuntimeError firlatir (bu veri zorunlu, cunku gram/Brent TRY
     cevrimleri buna bagli)."""
 
-    # 1) Birincil kaynak: frankfurter.app
+    # 1) Birincil kaynak: frankfurter.app (gecici hatalarda RETRY_ATTEMPTS kez denenir)
     try:
-        r = requests.get(
-            "https://api.frankfurter.app/latest",
-            params={"from": "USD", "to": "TRY,EUR"},
-            timeout=REQUEST_TIMEOUT,
-        )
-        r.raise_for_status()
+        def _call_frankfurter():
+            r = requests.get(
+                "https://api.frankfurter.app/latest",
+                params={"from": "USD", "to": "TRY,EUR"},
+                timeout=REQUEST_TIMEOUT,
+            )
+            r.raise_for_status()
+            return r
+
+        r = request_with_retry("frankfurter.app", _call_frankfurter)
         rates = r.json()["rates"]
         usd_try = float(rates["TRY"])
         usd_eur = float(rates["EUR"])
@@ -118,12 +155,16 @@ def fetch_exchange_rates() -> dict:
         log("Doviz kurlari frankfurter.app kaynagindan alindi.")
         return {"usd_try": usd_try, "eur_try": eur_try}
     except Exception as exc:
-        log(f"UYARI: frankfurter.app basarisiz ({exc}). Yedek kaynaga geciliyor.")
+        log(f"UYARI: frankfurter.app {RETRY_ATTEMPTS} denemede de basarisiz ({exc}). Yedek kaynaga geciliyor.")
 
-    # 2) Yedek kaynak: open.er-api.com
+    # 2) Yedek kaynak: open.er-api.com (o da gecici hatalarda RETRY_ATTEMPTS kez denenir)
     try:
-        r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=REQUEST_TIMEOUT)
-        r.raise_for_status()
+        def _call_erapi():
+            r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            return r
+
+        r = request_with_retry("open.er-api.com", _call_erapi)
         data = r.json()
         rates = data["rates"]
         usd_try = float(rates["TRY"])
@@ -132,7 +173,7 @@ def fetch_exchange_rates() -> dict:
         log("Doviz kurlari open.er-api.com (yedek) kaynagindan alindi.")
         return {"usd_try": usd_try, "eur_try": eur_try}
     except Exception as exc:
-        log(f"HATA: Yedek doviz kaynagi da basarisiz ({exc}).")
+        log(f"HATA: Yedek doviz kaynagi da {RETRY_ATTEMPTS} denemede basarisiz ({exc}).")
         raise RuntimeError("Doviz kurlari hicbir kaynaktan alinamadi.") from exc
 
 
@@ -142,11 +183,15 @@ def fetch_metal_prices() -> dict:
     prices = {}
     for symbol, key in (("XAU", "xau_usd_oz"), ("XAG", "xag_usd_oz")):
         try:
-            r = requests.get(f"https://api.gold-api.com/price/{symbol}", timeout=REQUEST_TIMEOUT)
-            r.raise_for_status()
+            def _call_gold_api(symbol=symbol):
+                r = requests.get(f"https://api.gold-api.com/price/{symbol}", timeout=REQUEST_TIMEOUT)
+                r.raise_for_status()
+                return r
+
+            r = request_with_retry(f"gold-api.com {symbol}", _call_gold_api)
             prices[key] = float(r.json()["price"])
         except Exception as exc:
-            log(f"HATA: {symbol} fiyati gold-api.com kaynagindan alinamadi ({exc}).")
+            log(f"HATA: {symbol} fiyati gold-api.com kaynagindan {RETRY_ATTEMPTS} denemede alinamadi ({exc}).")
             raise RuntimeError(f"{symbol} fiyati alinamadi.") from exc
     log("Kiymetli maden fiyatlari gold-api.com kaynagindan alindi.")
     return prices
